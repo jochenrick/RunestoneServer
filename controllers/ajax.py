@@ -39,15 +39,26 @@ def hsblog():    # Human Subjects Board Log
     event = request.vars.event
     course = request.vars.course
     ts = datetime.datetime.now()
-    db.useinfo.insert(sid=sid,act=act,div_id=div_id,event=event,timestamp=ts,course_id=course)
+    tt = request.vars.time
+    if not tt:
+        tt = 0
+
+    try:
+        db.useinfo.insert(sid=sid,act=act,div_id=div_id,event=event,timestamp=ts,course_id=course)
+    except:
+        logger.debug('failed to insert log record for {} in {} : {} {} {}'.format(sid, course, div_id, event, act))
+
     if event == 'timedExam' and act == 'finish':
         try:
             db.timed_exam.insert(sid=sid, course_name=course, correct=int(request.vars.correct),
                              incorrect=int(request.vars.incorrect), skipped=int(request.vars.skipped),
-                             time_taken=int(request.vars.time), timestamp=ts,
+                             time_taken=int(tt), timestamp=ts,
                              div_id=div_id)
-        except:
-            logger.debug('failed to insert')
+        except Exception as e:
+            logger.debug('failed to insert a timed exam record for {} in {} : {}'.format(sid, course, div_id))
+            logger.debug('correct {} incorrect {} skipped {} time {}'.format(request.vars.correct, request.vars.incorrect, request.vars.skipped, request.vars.time))
+            logger.debug('Error: {}'.format(e.message))
+
     if event == 'mChoice' and auth.user:
         # has user already submitted a correct answer for this question?
         if db((db.mchoice_answers.sid == sid) &
@@ -105,9 +116,11 @@ def runlog():    # Log errors and runs with code
             setCookie = True
     div_id = request.vars.div_id
     course = request.vars.course
-    code = request.vars.code
+    code = request.vars.code if request.vars.code else ""
     ts = datetime.datetime.now()
     error_info = request.vars.errinfo
+    pre = request.vars.prefix if request.vars.prefix else ""
+    post = request.vars.suffix if request.vars.suffix else ""
     if error_info != 'success':
         event = 'ac_error'
         act = error_info
@@ -117,24 +130,22 @@ def runlog():    # Log errors and runs with code
             event = request.vars.event
         else:
             event = 'activecode'
-    db.useinfo.insert(sid=sid,act=act,div_id=div_id,event=event,timestamp=ts,course_id=course)
-    if ('to_save' not in request.vars):
-        # old API
-        dbid = db.acerror_log.insert(sid=sid,div_id=div_id,timestamp=ts,course_id=course,code=code,emessage=error_info)
-        #lintAfterSave(dbid, code, div_id, sid)
-    else:
-        # new API
-        if (request.vars.to_save != "False"):
-            dbid = db.acerror_log.insert(sid=sid,div_id=div_id,timestamp=ts,course_id=course,code=code,emessage=error_info)
-            #lintAfterSave(dbid, code, div_id, sid)
-
-            # auto-save to code table
+    db.useinfo.insert(sid=sid, act=act, div_id=div_id, event=event, timestamp=ts, course_id=course)
+    dbid = db.acerror_log.insert(sid=sid,
+                                 div_id=div_id,
+                                 timestamp=ts,
+                                 course_id=course,
+                                 code=pre+code+post,
+                                 emessage=error_info)
+    #lintAfterSave(dbid, code, div_id, sid)
+    if auth.user:
+        if 'to_save' in request.vars and (request.vars.to_save == "True" or request.vars.to_save == "true"):
             db.code.insert(sid=sid,
                 acid=div_id,
                 code=code,
                 emessage=error_info,
                 timestamp=ts,
-                course_id=course,
+                course_id=auth.user.course_id,
                 language=request.vars.lang)
 
     response.headers['content-type'] = 'application/json'
@@ -209,24 +220,24 @@ def gethist():
     """
     codetbl = db.code
     acid = request.vars.acid
-    sid = request.vars.sid
 
-    if sid:
-        query = ((codetbl.sid == sid) & (codetbl.acid == acid) & (codetbl.timestamp != None))
+    if request.vars.sid:
+        sid = request.vars.sid
+        course_id = db(db.auth_user.username == sid).select(db.auth_user.course_id).first().course_id
+    elif auth.user:
+        sid = auth.user.username
+        course_id = auth.user.course_id
     else:
-        if auth.user:
-            query = ((codetbl.sid == auth.user.username) & (codetbl.acid == acid) & (codetbl.timestamp != None))
-        else:
-            query = None
+        sid = None
+        course_id = None
 
     res = {}
-    if query:
-        result = db(query)
+    if sid:
+        query = ((codetbl.sid == sid) & (codetbl.acid == acid) & (codetbl.course_id == course_id) & (codetbl.timestamp != None))
         res['acid'] = acid
-        if sid:
-            res['sid'] = sid
+        res['sid'] = sid
         # get the code they saved in chronological order; id order gets that for us
-        r = result.select(orderby=codetbl.id)
+        r = db(query).select(orderby=codetbl.id)
         res['history'] = [row.code for row in r]
         res['timestamps'] = [row.timestamp.isoformat() for row in r]
 
@@ -372,10 +383,15 @@ def savehighlight():
 def deletehighlight():
     uniqueId = request.vars.uniqueId
 
-    if uniqueId:
-        db(db.user_highlights.id == uniqueId).update(is_active = 0)
-    else:
-        logging.debug('uniqueId is None')
+    if auth.user:
+        try:
+            db(db.user_highlights.id == uniqueId).update(is_active=0)
+        except:
+            logging.debug('uniqueId is not valid: {} user {}'.format(uniqueId, auth.user.username))
+            return json.dumps({'success': False, 'message':'invalid id for highlighted text'})
+
+        return json.dumps({"success":True})
+
 
 def gethighlights():
     """
@@ -408,6 +424,8 @@ def gethighlights():
 def updatelastpage():
     lastPageUrl = request.vars.lastPageUrl
     lastPageScrollLocation = request.vars.lastPageScrollLocation
+    if lastPageUrl is None:
+        return   # todo:  log request.vars, request.args and request.env.path_info
     course = request.vars.course
     completionFlag = request.vars.completionFlag
     lastPageChapter = lastPageUrl.split("/")[-2]
@@ -554,6 +572,8 @@ def getStudentResults(question):
             currentAnswers = []
 
             for row in res:
+                if ':' not in row.act:
+                    continue  # skip this row
                 answer = row.act.split(':')[1]
 
                 if row.sid == currentSid:
@@ -580,13 +600,20 @@ def getaggregateresults():
     if not auth.user:
         return json.dumps([dict(answerDict={}, misc={}, emess='You must be logged in')])
 
+    is_instructor = verifyInstructorStatus(course,auth.user.id)
     # Yes, these two things could be done as a join.  but this **may** be better for performance
-    start_date = db(db.courses.course_name == course).select(db.courses.term_start_date).first().term_start_date
+    if course == 'thinkcspy' or course == 'pythonds':
+        start_date = datetime.datetime.now() - datetime.timedelta(days=90)
+    else:
+        start_date = db(db.courses.course_name == course).select(db.courses.term_start_date).first().term_start_date
     count = db.useinfo.id.count()
-    result = db((db.useinfo.div_id == question) &
-                (db.useinfo.course_id == course) &
-                (db.useinfo.timestamp >= start_date)
-                ).select(db.useinfo.act, count, groupby=db.useinfo.act)
+    try:
+        result = db((db.useinfo.div_id == question) &
+                    (db.useinfo.course_id == course) &
+                    (db.useinfo.timestamp >= start_date)
+                    ).select(db.useinfo.act, count, groupby=db.useinfo.act)
+    except:
+        return json.dumps([dict(answerDict={}, misc={}, emess='Sorry, the request timed out')])
 
     tdata = {}
     tot = 0
@@ -622,7 +649,7 @@ def getaggregateresults():
 
     returnDict = dict(answerDict=rdata, misc=miscdata)
 
-    if auth.user and verifyInstructorStatus(course,auth.user.id):  #auth.has_membership('instructor', auth.user.id):
+    if auth.user and is_instructor:  #auth.has_membership('instructor', auth.user.id):
         resultList = getStudentResults(question)
         returnDict['reslist'] = resultList
 
@@ -687,35 +714,20 @@ def getSphinxBuildStatus():
     task_name = request.vars.task_name
     course_url = request.vars.course_url
 
-    courseid = course_url.replace('/'+request.application+'/static/','')
-    courseid = courseid.replace('/index.html', '')
-    confdir = os.path.join(os.getcwd(), 'applications', request.application, 'custom_courses', courseid, 'done')
-
-
-    row = scheduler.task_status(task_name)
-
-    if os.path.exists(confdir):
-        os.remove(confdir)
-        try:
-            db(db.scheduler_run.task_id == row.id).update(status='COMPLETED')
-            db(db.scheduler_task.id == row.id).update(status='COMPLETED')
-        except:
-            pass
-        return dict(status='true', course_url=course_url)
-
-    st = row['status']
-
     response.headers['content-type'] = 'application/json'
-    if st == 'COMPLETED':
-        status = 'true'
-        return json.dumps(dict(status=status, course_url=course_url))
-    elif st == 'RUNNING' or st == 'QUEUED' or st == 'ASSIGNED':
-        status = 'false'
-        return json.dumps(dict(status=status, course_url=course_url))
-    else:  # task failed
-        status = 'failed'
-        tb = db(db.scheduler_run.task_id == row.id).select().first()['traceback']
-        return json.dumps(dict(status=status, traceback=tb))
+    results = {'course_url': course_url}
+    row = scheduler.task_status(task_name)
+    if row:
+        if row['status'] in ['QUEUED', 'ASSIGNED','RUNNING', 'COMPLETED']:
+            results['status'] = row['status']
+        else:  # task failed
+            results['status'] = row['status']
+            tb = db(db.scheduler_run.task_id == row.id).select().first()['traceback']
+            results['traceback']=tb
+    else:
+        results['status'] = 'failed'
+        results['info'] = 'no row'
+    return json.dumps(results)
 
 def getassignmentgrade():
     response.headers['content-type'] = 'application/json'
@@ -724,35 +736,67 @@ def getassignmentgrade():
 
     divid = request.vars.div_id
 
-    result = db(
-        (db.code.sid == auth.user.username) &
-        (db.code.acid == db.problems.acid) &
-        (db.problems.assignment == db.assignments.id) &
-        (db.assignments.released == True) &
-        (db.code.acid == divid)
-        ).select(
-            db.code.grade,
-            db.code.comment,
-            orderby=~db.code.timestamp
-        ).first()
-
     ret = {
         'grade':"Not graded yet",
         'comment': "No Comments",
         'avg': 'None',
         'count': 'None',
     }
+
+    # check that the assignment is released
+    #
+    a_q = db(
+        (db.assignments.released == True) &
+        (db.assignments.course == auth.user.course_id) &
+        (db.assignment_questions.assignment_id == db.assignments.id) &
+        (db.assignment_questions.question_id == db.questions.id) &
+        (db.questions.name == divid)
+    ).select(db.assignments.released, db.assignments.id, db.assignment_questions.points).first()
+    print a_q
+    if not a_q:
+        return json.dumps([ret])
+    # try new way that we store scores and comments
+
+    # divid is a question; find question_grades row
+    result = db(
+        (db.question_grades.sid == auth.user.username) &
+        (db.question_grades.course_name == auth.user.course_name) &
+        (db.question_grades.div_id == divid)
+    ).select(db.question_grades.score, db.question_grades.comment).first()
+    print result
     if result:
-        ret['grade'] = result.grade
+        # say that we're sending back result styles in new version, so they can be processed differently without affecting old way during transition.
+        ret['version'] = 2
+        ret['grade'] = result.score
+        ret['max'] = a_q.assignment_questions.points
         if result.comment:
             ret['comment'] = result.comment
 
-        query = '''select avg(grade), count(grade)
-                   from code where acid='%s';''' % (divid)
+    else:
+        # fall back on old way; eventually will deprecate this
+        result = db(
+            (db.code.sid == auth.user.username) &
+            (db.code.acid == db.problems.acid) &
+            (db.problems.assignment == db.assignments.id) &
+            (db.assignments.released == True) &
+            (db.code.acid == divid)
+            ).select(
+                db.code.grade,
+                db.code.comment,
+                orderby=~db.code.timestamp
+            ).first()
 
-        rows = db.executesql(query)
-        ret['avg'] = rows[0][0]
-        ret['count'] = rows[0][1]
+        if result:
+            ret['grade'] = result.grade
+            if result.comment:
+                ret['comment'] = result.comment
+
+            query = '''select avg(grade), count(grade)
+                       from code where acid='%s';''' % (divid)
+
+            rows = db.executesql(query)
+            ret['avg'] = rows[0][0]
+            ret['count'] = rows[0][1]
 
     return json.dumps([ret])
 
