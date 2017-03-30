@@ -150,5 +150,6 @@ db.define_table('parsons_answers',
     Field('answer','string'),
     Field('source','string'),
     Field('correct','boolean'),
+    Field('adaptive','string'),
     migrate='runestone_parsons_answers.table'
     )

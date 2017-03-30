@@ -80,7 +80,8 @@ def hsblog():    # Human Subjects Board Log
             correct = request.vars.correct
             answer = request.vars.answer
             source = request.vars.source
-            db.parsons_answers.insert(sid=sid, timestamp=ts, div_id=div_id, answer=answer, source=source, correct=correct, course_name=course)
+            adaptive = request.vars.adaptive
+            db.parsons_answers.insert(sid=sid, timestamp=ts, div_id=div_id, answer=answer, source=source, adaptive=adaptive, correct=correct, course_name=course)
 
     response.headers['content-type'] = 'application/json'
     res = {'log':True}
@@ -903,9 +904,9 @@ def getAssessResults():
         res = {'correct': rows[0][0], 'incorrect': rows[0][1], 'skipped': str(rows[0][2]), 'timeTaken': str(rows[0][3]), 'timestamp': str(rows[0][4])}
         return json.dumps(res)
     elif event == "parsons":
-        query = "select answer, source, timestamp from parsons_answers where div_id='%s' and course_name='%s' and sid='%s' order by timestamp desc" % (div_id, course, sid)
+        query = "select answer, source, adaptive, timestamp from parsons_answers where div_id='%s' and course_name='%s' and sid='%s' order by timestamp desc" % (div_id, course, sid)
         rows = db.executesql(query)
         if len(rows) == 0:
             return ""
-        res = {'answer': rows[0][0], 'source': rows[0][1], 'timestamp': str(rows[0][2])}
+        res = {'answer': rows[0][0], 'source': rows[0][1], 'adaptive': rows[0][2], 'timestamp': str(rows[0][3])}
         return json.dumps(res)
